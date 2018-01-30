@@ -1,0 +1,486 @@
+---
+title: "ECON 104 HW 3"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(tidyverse)
+library(forecast)
+library(lubridate)
+library(broom)
+library(strucchange)
+library(lmtest)
+library(knitr)
+```
+
+## Introduction
+
+The purpose of this paper is to build a time series regression for U.S. quarterly e-commerce retail sales, NSA in millions of dollars. The data is called series ECOMNSA and is available via FRED. 
+
+
+## Exploratory Data Analysis
+
+The first thing to do is to plot the ecomnsa scores over time.
+
+```{r readindata}
+data = read.csv("ECOMNSA.csv")
+data = data %>%
+  mutate(date = as.Date(DATE),
+         logecomnsa = log(ECOMNSA),
+         ecomnsa = ECOMNSA,
+         year = year(DATE),
+         month = month(DATE),
+         day = day(DATE),
+         Q2 = ifelse(month == 4, 1, 0),
+         Q3 = ifelse(month == 7, 1, 0),
+         Q4 = ifelse(month == 10,1, 0),
+         trend = 1:nrow(data),
+         trend2 = trend^2) %>%
+  select(month, year, logecomnsa, ecomnsa, trend,trend2, Q2, Q3, Q4)
+
+
+var(data$ecomnsa)
+ggplot(data, aes(x = trend)) +
+  geom_line(aes(y = ecomnsa))
+# = ts(data)
+#plot(data[,"ecomnsa"], ylab = "ecomnsa (Millions of Dollars)")
+
+```
+We can see that there is a clear positive upward trend associated with ecomnsa. In short e-commerce sales go up year by year. It is also notable that there is a clear seasonal spike at some associated seasonal value. And that spike seems to be growing proportionally to the size of ecomnsa itself. In order to correct for this growing magnitude spike, we look at the log of ecomnsa. That plot is shown below
+
+```{r}
+ggplot(data, aes(x = trend)) +
+  geom_line(aes(y = logecomnsa))
+
+#plot(data[, "logecomnsa"], ylab = "log ecomnsa)")
+```
+
+We see that seasonality is still present, but the spike does not grow as the value of log ecomnsa linearly increases. So for our dependent variable, we will be using log ecomnsa instead of ecomnsa as the seasonal fluctuations are roughly constant in size over time. There also dues seem to be a roughly quadratic trend in the data, at least for the first 35 or so observations. In particular, there seems to be a potentially 
+
+
+
+For our first model, we include $trend + Q1+Q2+Q3 +intercept$. In our second model we include all the same intercepts with an addition of a $trend^2$ term. The resits from those models are below. 
+```{r}
+season_trendfit = lm(logecomnsa ~ trend+Q2+Q3+Q4, data = data)
+season_trend2fit = lm(logecomnsa ~ trend+trend2+Q2+Q3+Q4, data = data)
+
+
+summ_basemodels = rbind(glance(season_trendfit),(glance(season_trend2fit)))
+summ_basemodels = cbind(Model = c("Season + Trend", "Season + Trend + Trend^2"),summ_basemodels)
+
+
+data$seasontrendfitted = season_trendfit$fitted.values
+data$seasontrendresid = season_trendfit$residuals
+data$seasontrend2fitted = season_trend2fit$fitted.values
+data$seasontrend2resid = season_trend2fit$residuals
+
+
+ggplot(data, aes(x = trend)) +
+  geom_line(aes(y = logecomnsa)) +
+  geom_line(aes(y = seasontrendfitted), col = "blue") +
+  geom_line(aes(y = seasontrend2fitted), col = "red") +
+  ggtitle("Season + Trend + Trend^2 Model")
+
+
+```
+While the R^2 from these models are enticing, the model fit itself seems to systematically under forecast in the beginning and systematically over forecast in the end. This seems to imply some sort of auto correlation. In order to confirm this, we generate residual plots and run some formal tests for autocorrelation below. We do this for the model with $trend^2$ as a regressor.
+
+
+```{r autocorr_tests, results="asis"}
+
+ggplot(data, aes(x = trend)) +
+  geom_line(aes(y = seasontrend2resid)) +
+  geom_hline(yintercept = 0, col = "red")+
+  ggtitle("Season + Trend + Trend^2 Model Residuals")+
+  ylab("Residuals")
+
+
+
+kable(tidy(dwtest(season_trend2fit)))
+
+
+```
+
+So the residual plot has clear persistent excursions below and above the mean of 0. The Durban Watson p-value of effectively 0 confirms that there is at least first order autocorrelation present in the data. 
+
+
+## Structural Change
+Before dealing with the dynamics of autocorrelation in our dataset, we test to see if there are any structural changes in our data. It does seem that our initial models might have a break somewhere around t=35 and t=40. This 
+roughly corresponds to the time around the recession of 2008. We start by running a max Chow test on all time periods between 11 and 60 in order to leave about 15 percent of the data at the beginning and end of the time series to use for comparison. The results of the Max Chow test are below
+
+```{r}
+f_Stats = Fstats(logecomnsa ~ trend+trend2+Q2+Q3+Q4, data = data)
+plot(f_Stats)
+
+print(paste0("point of biggest F-stat is t=",f_Stats$breakpoint))
+maxchowtest = sctest(f_Stats, type = c("supF"))
+maxchowtest
+
+
+
+
+# sctest(logecomnsa ~ trend+trend2+Q2+Q3+Q4, type = "Chow", point = 40, data=data)
+
+
+```
+
+The plot of the f-stats show us that right around the recession (ie t=35 to t=40), the F-statistics starts to balloon upwards. The Max value of the Chow test happens at t=36. The associated F-stat is 372.79 and the associated p-value is effectively 0. Thus we reject the null of no structural change. We also decide to plot the recursive residuals to get a sense of how the residuals change over time and confirm the existence of structural changes. 
+
+```{r}
+rec_resid = data.frame(rec_residu = recresid(season_trend2fit))
+
+ggplot(data = rec_resid) +
+  geom_line(aes(x = 1:nrow(rec_resid), y =rec_residu))+ 
+  xlab("Index") +
+  ylab("Recursive Residuals") +
+  ggtitle("Recursive Residual Plot")
+
+
+```
+
+We can clearly see that the recursive residuals plummet to below 0 around the time of the recession. There is a clear pattern to the recursive residuals. Now for the selection of the breakpoints, we decide to split the data into 3 parts: Pr recession, during recession, and post recession. This is because we believe that online retail sales probably faced a different data generating process during the recession and we don't want the data points from the recession time period to affect the OLS estimates. From Fr Ed's website, we can see that the recession started in Q1 of 2008 and ended in Q3 of 2009. This corresponds to t=34 and t=40. Below we split up the data and plot the three resulting data that we hope to model
+
+
+```{r}
+data_pre = data %>%
+  filter(trend %in% 1:33)
+data_recession = data %>%
+  filter(trend %in% 34:40)
+data_post = data %>%
+  filter(trend %in% 41:nrow(data))
+
+data_post = data_post %>%
+  mutate(trend = 1:nrow(data_post),
+         trend2 = trend^2)
+data_recession = data_recession %>%
+  mutate(trend = 1:nrow(data_recession),
+         trend2 = trend^2)
+
+
+ggplot(aes(x=trend), data = data_pre)+
+  geom_line(aes(y = logecomnsa))
+
+ggplot(aes(x=trend), data = data_recession)+
+  geom_line(aes(y = logecomnsa))
+
+ggplot(aes(x=trend), data = data_post)+
+  geom_line(aes(y = logecomnsa))
+
+
+f_stats_pre = Fstats(logecomnsa ~ trend+trend2+Q2+Q3+Q4, data = data_pre)
+plot(f_stats_pre)
+
+f_stats_post = Fstats(logecomnsa ~ trend+Q2+Q3+Q4, data = data_post)
+plot(f_stats_post)
+
+print(paste0("point of biggest F-stat is t=",f_stats_post$breakpoint))
+maxchowtest = sctest(f_stats_post, type = c("supF"))
+maxchowtest
+
+
+```
+
+
+
+
+To test the robustness of our models, we recreate the models with Trend, seasonality, and trend^2 for all 3 data groups and overlay the fitted values on the original data. We also present the residual plots for the three data sets. The red lines are the model with just $trend$, and the blue lines are the models with $trend + trend^2$. 
+
+```{r}
+
+pre_trend = lm(logecomnsa ~ trend+Q2+Q3+Q4, data = data_pre)
+pre_trend2= lm(logecomnsa ~ trend+trend2+Q2+Q3+Q4, data = data_pre)
+data_pre$trendfitted = pre_trend$fitted.values
+data_pre$trendresid  = pre_trend$residuals
+data_pre$trend2fitted= pre_trend2$fitted.values
+data_pre$trend2resid = pre_trend2$residuals
+
+post_trend = lm(logecomnsa ~ trend+Q2+Q3+Q4, data = data_post)
+post_trend2= lm(logecomnsa ~ trend+trend2+Q2+Q3+Q4, data = data_post)
+data_post$trendfitted = post_trend$fitted.values
+data_post$trendresid  = post_trend$residuals
+data_post$trend2fitted= post_trend2$fitted.values
+data_post$trend2resid = post_trend2$residuals
+
+
+recession_trend = lm(logecomnsa ~ trend+Q2+Q3+Q4, data = data_recession)
+recession_trend2= lm(logecomnsa ~ trend+trend2+Q2+Q3+Q4, data = data_recession)
+data_recession$trendfitted = recession_trend$fitted.values
+data_recession$trendresid  = recession_trend$residuals
+data_recession$trend2fitted= recession_trend2$fitted.values
+data_recession$trend2resid = recession_trend2$residuals
+
+ggplot(aes(x=trend), data = data_pre)+
+  geom_line(aes(y = logecomnsa)) +
+  geom_line(aes(y = trendfitted), col = "red") +
+  geom_line(aes(y = trend2fitted), col = "steelblue")
+
+
+ggplot(aes(x=trend), data = data_recession)+
+  geom_line(aes(y = logecomnsa))+
+  geom_line(aes(y = trendfitted), col = "red") +
+  geom_line(aes(y = trend2fitted), col = "steelblue")
+
+
+ggplot(aes(x=trend), data = data_post)+
+  geom_line(aes(y = logecomnsa))+
+  geom_line(aes(y = trendfitted), col = "red") +
+  geom_line(aes(y = trend2fitted), col = "steelblue")
+
+
+summ_models_pre = rbind(glance(pre_trend),(glance(pre_trend2)))
+summ_models_pre = cbind(Model = c("Season + Trend", "Season + Trend + Trend^2"),summ_models_pre)
+
+summ_models_rec = rbind(glance(recession_trend),(glance(recession_trend2)))
+summ_models_rec = cbind(Model = c("Season + Trend", "Season + Trend + Trend^2"),summ_models_rec)
+
+summ_models_post = rbind(glance(post_trend),(glance(post_trend2)))
+summ_models_post = cbind(Model = c("Season + Trend", "Season + Trend + Trend^2"),summ_models_post)
+
+kable(summ_models_pre)
+kable(summ_models_rec)
+kable(summ_models_post)
+
+```
+
+We can see that the models with the trend^2 term, ie the blue line, seem to follow the data better. However,  the two tables, which are the model metrics for the pre and post models respectively, show us that the model with just a trend component have slightly lower AIC scores. So this suggests that a trend + seasonality model is a good starting point. The next question we have to ask is whether autocorrelation is present in the data. 
+
+## Autucorrelation 
+ When we were looking at the full dataset, we had reason to believe that there was high autocorrelation. The residual plot has persistent excursions from the mean and the Durban Watson test rejected the null of no AR(1) autocorrelation. We now see if those results hold in each of our divided datasets using the same model that includes $trend+trend^2+Q2+Q3+Q4+constant$
+ 
+```{r}
+
+ggplot(data = data_pre, aes(x = trend)) +
+  geom_line(aes(y = trendresid)) +
+  geom_hline(yintercept = 0, col = "red")+
+  ggtitle("Season + Trend Model Residuals Pre-Recession")+
+  ylab("Residuals")
+
+ggplot(data = data_recession, aes(x = trend)) +
+  geom_line(aes(y = trendresid)) +
+  geom_hline(yintercept = 0, col = "red")+
+  ggtitle("Season + Trend Model Residuals During Recession")+
+  ylab("Residuals")
+
+
+ggplot(data = data_post, aes(x = trend)) +
+  geom_line(aes(y = trendresid)) +
+  geom_hline(yintercept = 0, col = "red")+
+  ggtitle("Season + Trend Model Residuals Post-Recession")+
+  ylab("Residuals")
+
+
+kable(tidy(dwtest(pre_trend)))
+kable(tidy(dwtest(post_trend)))
+kable(tidy(dwtest(recession_trend)))
+
+
+```
+ Looking at the data pre and post recession, we see that there are still some, albeit smaller, persistent excursions above or below the mean. This is confirmed by the results of the Durban Watson test for both of these datasets, which returns an associated p-value of 0.000001 and 0.0003 respectively. Thus there is at least first order serial autocorrelation present. For the recession dataset, the DW returns a p-value of 0.19 and we accept the null of no first order serial autocorrelation. However, given the small size of this dataset, we should take these results with a grain of salt. To further analyze the autocorrelation in the pre and post recession datasets, we look at the autocorrelation and partial autocorrelation functions for all 3 datasets. 
+ 
+```{r}
+Acf(data_pre$trendresid, main = "Pre-Recession Model with Trend + Seasonality")
+Pacf(data_pre$trendresid,main = "Pre-Recession Model with Trend + Seasonality")
+
+Acf(data_recession$trendresid, main = "Recession Model with Trend + Seasonality")
+Pacf(data_recession$trendresid,main = "Recession Model with Trend + Seasonality")
+
+Acf(data_post$trendresid, main = "Post-Recession Model with Trend + Seasonality")
+Pacf(data_post$trendresid,main = "Post-Recession Model with Trend + Seasonality")
+
+
+
+```
+ So we see that for the pre and post recession datasets, the ACF plots all have significant and positive first order autocorrelation. And it seems like they mostly exponentially decay smoothly to 0 and then exhibit non-significant negative autocorrelation at higher lags. And when looking at the partial autocorrelation functions, the same story unfold as both pre and post recession data have significant first order autocorrelation that then cuts off quickly to 0. In the case of post recession data, there is some high (but insignificant) autocorrelation at lags of 3 and 5 respectively that don't perfectly align with the sharp cut-off story. However in general, these plots give support to some degree of first order autocorrelation for the pre and post recession data. The Durban Watson test statistics from above also confirm this. So it is clear that an AR(1) model would be most appropriate. 
+ 
+## AR(1) Model
+
+Its clear that the regression data doesn't exhibit any autocorrelation, but it is a significant problem for the pre and post recession data. So for the pre and post recession data, we run two AR(1) models with one of the models having the following regressors: $trend+trend^2+Q2+Q3+Q4+intercept$. The other model has the same regressors and an addition $trend^2$ regressor. Below are the 2 model outputs for the pre-recession data
+```{r}
+ts_data_pre = data_pre[,"logecomnsa"]
+ts_data_post = data_post[,"logecomnsa"]
+
+ar1pre = arima(ts_data_pre, order = c(1,0,0), xreg = data_pre %>% select(trend, Q2, Q3, Q4))
+ar1post = arima(ts_data_post, order = c(1,0,0), xreg = data_post %>% select(trend, Q2, Q3, Q4))
+
+ar1pre2 = arima(ts_data_pre, order = c(1,0,0), xreg = data_pre %>% select(trend, trend2, Q2, Q3, Q4))
+ar1post2 = arima(ts_data_post, order = c(1,0,0), xreg = data_post %>% select(trend, trend2, Q2, Q3, Q4))
+
+data_pre$ar1fittedtrend  = fitted(ar1pre)
+data_pre$ar1residtrend   = ar1pre$residuals
+
+data_post$ar1fittedtrend = fitted(ar1post)
+data_post$ar1residtrend   = ar1post$residuals
+
+data_pre$ar1fittedtrend2 = fitted(ar1pre2)
+data_pre$ar1residtrend2   = ar1pre2$residuals
+
+data_post$ar1fittedtrend2= fitted(ar1post2)
+data_post$ar1residtrend2   = ar1post2$residuals
+       
+
+
+kable(tidy(ar1pre))
+kable(tidy(ar1pre2))
+
+summary(ar1pre)
+summary(ar1pre2)
+
+kable(data.frame(Pre_model = c("AR(1) + Trend + Seasonal", "AR(1) + Trend + Trend^2+ Seasonal"),
+            BIC = c(AIC(ar1pre, k = log(length(ts_data_post))),AIC(ar1pre2, k = log(length(ts_data_pre)))),
+           sigma = c(ar1pre$sigma2, ar1pre2$sigma2),
+           loglik = c(ar1pre$loglik,ar1pre2$loglik)))
+
+```
+
+We see that both models have very similar beta coefficients on the intercept and quarters. However the trend^2 model has a slightly higher beta coefficient on $trend$ and a very small negative coefficient on $trend^2$. The coefficient on the first lag also drops slightly from 0.88 to 0.71.  The BIC is also marginally lower in the first model with only trend. However the Mean Average Error is slightly lower in the second model with $trend^2$. Next we look at the two model outputs of the post-recession data. 
+
+
+```{r}
+kable(tidy(ar1post))
+kable(tidy(ar1post2))
+
+summary(ar1post)
+summary(ar1post2)
+
+kable(data.frame(Post_model = c("AR(1) + Trend + Seasonal", "AR(1) + Trend + Trend^2+ Seasonal"),
+           BIC = c(AIC(ar1post, k = log(length(ts_data_post))),AIC(ar1post2, k = log(length(ts_data_post)))),
+           sigma = c(ar1post$sigma2, ar1post2$sigma2),
+           loglik = c(ar1post$loglik,ar1post2$loglik)))
+
+
+```
+
+Here we see that the quarterly effects remain the same across both models. Again, the model with $trend^2$ has a small negative coefficient on $trend^2$ and a slightly higher $trend$ coefficient as compared to the first model with only $trend$. The coefficient on the lagged term also decreases. Here we see that the BIC is marginally lower for the second model with the $trend^2$ term. However, the difference in AIC is less than 3, so these results are not really significant. In order to further evaluate these models, we plot both models fitted values against the 'real' values of the data. Those graphs are below
+
+```{r}
+
+
+ggplot(data = data_pre, aes(x=trend))+
+  geom_line(aes(y=logecomnsa))+
+  geom_line(aes(y= ar1fittedtrend, col = "red"))+
+  geom_line(aes(y= ar1fittedtrend2, col = "steelblue"))+
+  ggtitle("AR(1) Model for Pre Recession Data")+
+  scale_color_hue(labels = c("AR 1 with Trend","AR 1 with Trend^2" )) +
+  labs(col = "Models")
+  
+ggplot(data = data_post, aes(x=trend))+
+  geom_line(aes(y=logecomnsa))+
+  geom_line(aes(y= ar1fittedtrend, col = "red"))+
+  geom_line(aes(y= ar1fittedtrend2, col = "steelblue"))+
+  ggtitle("AR(1) Model for Post Recession Data")+  
+  scale_color_hue(labels = c("AR 1 with Trend","AR 1 with Trend^2" )) +
+  labs(col = "Models")                             
+                                                                
+```
+
+
+We also take a look at the residual plot of both of these models. The blue line connotes the residuals of the model with a $trend^2$ term and the red line is the residuals of the model that doesn't have that term. We also present the Partial Autocorrelation Function Plots For the two models
+
+```{r}
+
+ggplot(data_pre, aes(x = trend)) +
+  geom_line(aes(y = ar1residtrend), col = "red") +
+  geom_line(aes(y = ar1residtrend2), col = "steelblue") +
+  geom_hline(yintercept = 0, col = "black")+
+  ggtitle("Pre-recession Data Model Residuals")
+
+ggplot(data_post, aes(x = trend)) +
+  geom_line(aes(y = ar1residtrend), col = "red") +
+  geom_line(aes(y = ar1residtrend2), col = "steelblue") +
+  geom_hline(yintercept = 0, col = "black")+
+  ggtitle("Post-recession Data Model Residuals")
+
+
+
+Pacf(data_pre$ar1residtrend, main = "Pre Recession Trend Model")
+Pacf(data_pre$ar1residtrend2, main = "Pre Recession Trend^2 Model")
+
+Pacf(data_post$ar1residtrend, main = "Post Recession Trend Model")
+Pacf(data_post$ar1residtrend2, main = "Post Recession Trend^2 Model")
+
+
+```
+So we see from the plots that the residual plot seem to be have much fewer persistent exursions from the mean. The Partial Autocorrelation functions all show non significant partial autocorrelation for all lags, suggesting that there is no longer significant autocorrelation present in the data. 
+```{r mode_resid_histograms}
+ggplot(data = data_pre)+
+  geom_histogram(aes(ar1residtrend2), binwidth = .005)+
+  ggtitle("Pre-recession Data Residuals")
+ggplot(data = data_recession)+
+  geom_histogram(aes(trendresid), binwidth = .005)+
+  ggtitle("Recession Data Residuals")
+ggplot(data = data_post)+
+  geom_histogram(aes(ar1residtrend), binwidth = .005)+
+  ggtitle("Post-recession Data Residuals")
+
+
+```
+
+
+```{r redictions}
+
+x1 = data.frame(trend = 32:35, trend2 = (32:35)^2, Q2 = c(0,0,0,1), Q3 = c(1,0,0,0), Q4 = c(0,1,0,0))
+
+predic = predict(ar1post2, n.ahead = 4, newxreg = x1,
+        se.fit = TRUE)
+
+
+final_predictions = data.frame(pred = (append(data_post$ar1fittedtrend2, predic$pred)), actual = append(data_post$logecomnsa, c(NA, NA, NA, NA)))
+final_predictions = data.frame(pred = (append(data_post$ar1fittedtrend2, predic$pred)), actual = append(data_post$logecomnsa, c(NA, NA, NA, NA)), trend = 1:nrow(final_predictions))
+
+ggplot(data= final_predictions, aes(x=trend))+
+  geom_line(aes(y=pred), col = "steelblue")+
+  geom_line(aes(y=actual)) +
+  ggtitle("Future Predictions")
+
+ggplot(data= final_predictions, aes(x=trend))+
+  geom_line(aes(y=exp(pred)), col = "steelblue")+
+  geom_line(aes(y=exp(actual))) +
+  ggtitle("Future Predictions") +
+  ylab("ECOMNSA")
+
+```
+
+
+```{r densityforecast}
+
+whitelm<-arima(ar1post2$residuals^2, order = c(1,0,0), xreg = data_post %>% select(trend, trend2, Q2, Q3, Q4))
+sd_resid = sqrt(fitted(whitelm))
+std_resid = ar1post2$residuals / sd_resid
+
+
+x2 = data.frame(trend = 32, trend2 = (32)^2, Q2 = c(0), Q3 = c(1), Q4 = c(0))
+
+sample_std_resid = sample(std_resid, 10000, replace = TRUE)
+new_arrival_sd = sqrt(predict(whitelm, n.ahead=1, newxreg = x2 )$pred)[[1]]
+new_arrival_mean = (predict(ar1post2, n.ahead=1, newxreg = x2 )$pred)[[1]]
+
+dist_new_arrival = sample_std_resid*new_arrival_sd + new_arrival_mean
+
+new_arrival_distribution_hist = ggplot()+
+  geom_histogram(aes(dist_new_arrival),
+                 col = "white",
+                 fill = "darkgreen",
+                 binwidth = .005,
+                 alpha=.5) +
+                 labs(title="Density Prediction ") +
+                 labs(x="Log Wage", y="Count")
+
+
+new_person_predictions = cbind(Point_estimate = new_arrival_mean, 
+                               data.frame(as.list(quantile(dist_new_arrival, c(0.025,0.975)))))
+
+
+new_arrival_distribution_hist  
+kable(new_person_predictions)
+
+# lm(ar1post2$residuals^2~trend+trend2+Q2+Q3+Q4 , data = data_post)
+
+```
+
+
+#####Code Appendix
+```{r, ref.label=knitr::all_labels(),echo=TRUE,eval=FALSE}
+
+```
+
